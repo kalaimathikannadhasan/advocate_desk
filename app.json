@@ -1,0 +1,22 @@
+{
+  "expo": {
+    "name": "Advocate Desk",
+    "slug": "advocate-desk",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "splash": {
+      "resizeMode": "contain",
+      "backgroundColor": "#F4F6FA"
+    },
+    "android": {
+      "package": "com.example.advocatedesk"
+    },
+    "ios": {
+      "bundleIdentifier": "com.example.advocatedesk"
+    },
+    "plugins": [
+      "expo-status-bar"
+    ]
+  }
+}

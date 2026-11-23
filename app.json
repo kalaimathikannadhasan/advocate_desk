@@ -16,7 +16,8 @@
       "bundleIdentifier": "com.example.advocatedesk"
     },
     "plugins": [
-      "expo-status-bar"
+      "expo-status-bar",
+      "expo-sqlite"
     ]
   }
 }

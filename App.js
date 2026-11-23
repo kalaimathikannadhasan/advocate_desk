@@ -6,15 +6,15 @@ import {
 import { StatusBar } from "expo-status-bar";
 
 const initialCases = [
-  { id:"C-1001", number:"O.S. 45/2025", type:"Civil", client:"Ravi Kumar", court:"District Court, Trichy", next:"2026-12-02", status:"Active", petitioner:"Ravi Kumar", respondent:"Mohan", judge:"To be updated", notes:"Property boundary dispute" },
-  { id:"C-1002", number:"C.C. 18/2025", type:"Criminal", client:"Priya", court:"Judicial Magistrate Court", next:"2026-12-05", status:"Active", petitioner:"State", respondent:"Arun", judge:"To be updated", notes:"Bail hearing follow-up" }
+  { id:"C-1001", number:"O.S. 45/2025", type:"Civil", client:"KALAIMATHI K", court:"District Court, Trichy", next:"2026-12-02", status:"Active", petitioner:"Ravi Kumar", respondent:"Mohan", judge:"To be updated", notes:"Property boundary dispute" },
+  { id:"C-1002", number:"C.C. 18/2025", type:"Criminal", client:"DEVI", court:"Judicial Magistrate Court", next:"2026-12-05", status:"Active", petitioner:"State", respondent:"Arun", judge:"To be updated", notes:"Bail hearing follow-up" }
 ];
 const initialClients = [
-  { id:"CL-001", name:"Ravi Kumar", phone:"9876543210", email:"ravi@example.com", address:"Trichy", notes:"Property matter" },
-  { id:"CL-002", name:"Priya", phone:"9876501234", email:"priya@example.com", address:"Lalgudi", notes:"Criminal matter" }
+  { id:"CL-001", name:"KALAIMATHI K", phone:"9876543210", email:"kalai@example.com", address:"Trichy", notes:"Property matter" },
+  { id:"CL-002", name:"DEVI", phone:"9876501234", email:"devi@example.com", address:"Lalgudi", notes:"Criminal matter" }
 ];
 const initialPayments = [
-  { id:"P-001", client:"Ravi Kumar", caseNo:"O.S. 45/2025", total:"50000", paid:"20000", date:"2026-11-20", mode:"UPI" }
+  { id:"P-001", client:"KALAIMATHI", caseNo:"O.S. 45/2025", total:"50000", paid:"20000", date:"2026-11-20", mode:"UPI" }
 ];
 
 const tabs = ["Dashboard","Clients","Cases","Hearings","Fees","Advocate"];

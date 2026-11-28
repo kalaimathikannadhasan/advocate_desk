@@ -5,20 +5,18 @@ import {
   ScrollView, StyleSheet, Alert, Modal, KeyboardAvoidingView, Platform
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
-import { supabase } from "./lib/supabase";
-import LoginScreen from "./screens/login";
 
-
-const tabs = ["Dashboard", "Clients", "Cases", "Hearings", "Fees", "Advocate"];
-
-const emptyClient = { name: "", phone: "", email: "", address: "", notes: "" };
-const emptyCase = {
-  number: "", type: "Civil", client: "", court: "",
-  next: "", petitioner: "", respondent: "", judge: "", notes: ""
-};
-const emptyPayment = {
-  client: "", caseNo: "", total: "", paid: "", date: "", mode: "UPI"
-};
+const initialCases = [
+  { id:"C-1001", number:"O.S. 45/2025", type:"Civil", client:"Kalaimathi Kannadhasan", court:"District Court, Trichy", next:"2026-12-02", status:"Active", petitioner:"Kalaimathi Kannadhasan", respondent:"Mohan", judge:"To be updated", notes:"Property boundary dispute" },
+  { id:"C-1002", number:"C.C. 18/2025", type:"Criminal", client:"Kalaiyarasi", court:"Judicial Magistrate Court", next:"2026-12-05", status:"Active", petitioner:"State", respondent:"Arun", judge:"To be updated", notes:"Bail hearing follow-up" }
+];
+const initialClients = [
+  { id:"CL-001", name:"Kalaimathi Kannadhasan", phone:"9876543210", email:"ravi@example.com", address:"Trichy", notes:"Property matter" },
+  { id:"CL-002", name:"Kalaiyarasi", phone:"9876501234", email:"Kalaiyarasi@example.com", address:"Lalgudi", notes:"Criminal matter" }
+];
+const initialPayments = [
+  { id:"P-001", client:"Kalaimathi Kannadhasan", caseNo:"O.S. 45/2025", total:"50000", paid:"20000", date:"2026-11-20", mode:"UPI" }
+];
 
 const makeId = (prefix) => `${prefix}-${Date.now()}`;
 

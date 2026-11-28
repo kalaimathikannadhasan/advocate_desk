@@ -103,55 +103,67 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [modal, setModal] = useState("");
+  const [editing, setEditing] = useState(null);
+  const [formError, setFormError] = useState("");
+  const [profileForm, setProfileForm] = useState({ name: "", phone: "", office: "" });
+  const saveLock = useRef(false);
   const [search, setSearch] = useState("");
 
   const [clientForm, setClientForm] = useState({ ...emptyClient });
   const [caseForm, setCaseForm] = useState({ ...emptyCase });
   const [paymentForm, setPaymentForm] = useState({ ...emptyPayment });
 
-  // Get logged-in user
-  // LOGOUT FUNCTION
-const handleLogout = async () => {
-  try {
-    const { error } = await supabase.auth.signOut();
+  const [loggingOut, setLoggingOut] = useState(false);
+  const logoutLock = useRef(false);
+  const [logoutError, setLogoutError] = useState("");
 
-    if (error) throw error;
+  const handleLogout = async () => {
+    if (logoutLock.current || saving || saveLock.current) return;
+    logoutLock.current = true;
+    setLoggingOut(true);
+    setLogoutError("");
+    try {
+      const { error } = await supabase.auth.signOut({ scope: "local" });
+      if (error) throw error;
 
-    setSession(null);
-    setClients([]);
-    setCases([]);
-    setPayments([]);
-    setTab("Dashboard");
-    setSearch("");
-    setModal("");
+      requestId.current += 1;
+      setEditing(null);
+      setFormError("");
+      setProfileForm({ name: "", phone: "", office: "" });
+      setSession(null);
+      setClients([]);
+      setCases([]);
+      setPayments([]);
+      setTab("Dashboard");
+      setSearch("");
+      setModal("");
+      setClientForm({ ...emptyClient });
+      setCaseForm({ ...emptyCase });
+      setPaymentForm({ ...emptyPayment });
+      setLoading(false);
+    } catch (error) {
+      const message = error?.message || "Please try again.";
+      console.error("Logout Error:", message);
+      setLogoutError(message);
+    } finally {
+      logoutLock.current = false;
+      setLoggingOut(false);
+    }
+  };
 
-    console.log("Logout successful");
-
-  } catch (error) {
-    Alert.alert("Logout Failed", error.message);
-  }
-};
-
-// LOGOUT CONFIRMATION
-const confirmLogout = () => {
-  Alert.alert(
-    "Logout",
-    "Are you sure you want to logout?",
-    [
-      {
-        text: "Cancel",
-        style: "cancel",
-      },
-      {
-        text: "Logout",
-        style: "destructive",
-        onPress: handleLogout,
-      },
-    ]
-  );
-};
-
-// Get logged-in user
+  const confirmLogout = () => {
+    if (logoutLock.current || saving || saveLock.current) return;
+    if (Platform.OS === "web") {
+      if (window.confirm("Are you sure you want to logout?")) {
+        void handleLogout();
+      }
+      return;
+    }
+    Alert.alert("Logout", "Are you sure you want to logout?", [
+      { text: "Cancel", style: "cancel" },
+      { text: "Logout", style: "destructive", onPress: handleLogout },
+    ]);
+  };
 
   const getCurrentUser = async () => {
     const { data, error } = await supabase.auth.getUser();
@@ -236,14 +248,83 @@ const confirmLogout = () => {
     return item?.case_number || "—";
   };
 
+  // Reuse the same forms for creation and individual record editing.
+  const openAdd = (kind) => {
+    setEditing(null);
+    setFormError("");
+    if (kind === "client") setClientForm({ ...emptyClient });
+    if (kind === "case") setCaseForm({ ...emptyCase, status: "Active" });
+    if (kind === "payment") setPaymentForm({ ...emptyPayment });
+    setModal(kind);
+  };
+
+  const openEdit = (kind, row) => {
+    if (saving || logoutLock.current) return;
+    setFormError("");
+    setEditing(row);
+    if (kind === "client") {
+      setClientForm(Object.fromEntries(Object.keys(emptyClient).map(k => [k, String(row[k] ?? "")])));
+    } else if (kind === "case") {
+      setCaseForm({ number: row.case_number ?? "", type: row.case_type ?? "Civil",
+        client: getClientName(row.client_id), court: row.court_name ?? "",
+        next: row.next_hearing ?? "", petitioner: row.petitioner ?? "",
+        respondent: row.respondent ?? "", judge: row.judge_name ?? "",
+        notes: row.notes ?? "", status: row.status ?? "Active" });
+    } else if (kind === "payment") {
+      setPaymentForm({ client: getClientName(row.client_id),
+        caseNo: row.case_id ? getCaseNumber(row.case_id) : "",
+        total: String(row.total_fee ?? ""), paid: String(row.paid_amount ?? ""),
+        date: row.payment_date ?? "", mode: row.payment_mode ?? "UPI" });
+    } else if (kind === "profile") {
+      setProfileForm({ name: row.name ?? "", phone: row.phone ?? "", office: row.office ?? "" });
+    }
+    setModal(kind);
+  };
+
+  const persistRecord = async (table, record, userId) => {
+    if (!editing) return supabase.from(table).insert([record]).select().single();
+    const { id, user_id, ...changes } = record;
+    return supabase.from(table).update(changes)
+      .eq("id", editing.id).eq("user_id", userId).select().single();
+  };
+
+  const resolveClient = (name) => {
+    const matches = clients.filter(c => c.name.trim().toLowerCase() === name.trim().toLowerCase());
+    const original = matches.find(c => c.id === editing?.client_id);
+    if (original) return original;
+    if (matches.length !== 1) throw new Error(matches.length ? "Multiple clients have this name. Use a unique client name before saving." : "Client not found. Enter an existing client name.");
+    return matches[0];
+  };
+
+  const profile = session?.user?.user_metadata ?? {};
+  const saveProfile = async () => {
+    if (saveLock.current || logoutLock.current) return;
+    if (!profileForm.name.trim()) { setFormError("Enter advocate name."); return; }
+    saveLock.current = true;
+    setSaving(true);
+    setFormError("");
+    try {
+      const { data, error } = await supabase.auth.updateUser({ data: {
+        name: profileForm.name.trim(), phone: profileForm.phone.trim(), office: profileForm.office.trim()
+      } });
+      if (error) throw error;
+      setSession(prev => prev ? { ...prev, user: data.user } : prev);
+      setModal(""); setEditing(null);
+    } catch (error) { setFormError(error.message || "Unable to update profile."); }
+    finally { saveLock.current = false; setSaving(false); }
+  };
+
   // ADD CLIENT
   const addClient = async () => {
+    if (logoutLock.current || saveLock.current) return;
+    setFormError("");
     if (!clientForm.name.trim() || !clientForm.phone.trim()) {
-      Alert.alert("Required", "Enter client name and phone number.");
+      setFormError("Enter client name and phone number.");
       return;
     }
 
     try {
+      saveLock.current = true;
       setSaving(true);
       const user = await getCurrentUser();
 
@@ -257,60 +338,39 @@ const confirmLogout = () => {
         user_id: user.id
       };
 
-      const { data, error } = await supabase
-        .from("client_details")
-        .insert([newClient])
-        .select()
-        .single();
+      const { data, error } = await persistRecord("client_details", newClient, user.id);
 
       if (error) throw error;
+      requestId.current += 1; setLoading(false);
 
-      setClients((prev) => [data, ...prev]);
+      setClients((prev) => editing ? prev.map(row => row.id === data.id ? data : row) : [data, ...prev]);
       setClientForm({ ...emptyClient });
       setModal("");
 
-      Alert.alert("Success", "Client added successfully!");
+      setEditing(null);
     } catch (error) {
-      Alert.alert("Client Error", error.message);
+      setFormError(error.message);
     } finally {
+      saveLock.current = false;
       setSaving(false);
     }
   };
 
   // ADD CASE
   const addCase = async () => {
+    if (logoutLock.current || saveLock.current) return;
+    setFormError("");
     if (!caseForm.number.trim() || !caseForm.client.trim()) {
-      Alert.alert("Required", "Enter case number and client name.");
+      setFormError("Enter case number and client name.");
       return;
     }
 
     try {
+      saveLock.current = true;
       setSaving(true);
-      const handleLogout = async () => {
-  try {
-    const { error } = await supabase.auth.signOut();
-
-    if (error) throw error;
-
-    setSession(null);
-    setClients([]);
-    setCases([]);
-    setPayments([]);
-    setTab("Dashboard");
-    setSearch("");
-    setModal("");
-
-    console.log("Logout successful");
-
-  } catch (error) {
-    Alert.alert("Logout Failed", error.message);
-  }
-};
       const user = await getCurrentUser();
 
-      const selectedClient = clients.find(
-        (c) => c.name.trim().toLowerCase() === caseForm.client.trim().toLowerCase()
-      );
+      const selectedClient = resolveClient(caseForm.client);
 
       if (!selectedClient) {
         throw new Error("Client not found. Please add the client first or enter the exact client name.");
@@ -323,7 +383,7 @@ const confirmLogout = () => {
         client_id: selectedClient.id,
         court_name: caseForm.court.trim() || null,
         next_hearing: caseForm.next.trim() || null,
-        status: "Active",
+        status: caseForm.status?.trim() || "Active",
         petitioner: caseForm.petitioner.trim() || null,
         respondent: caseForm.respondent.trim() || null,
         judge_name: caseForm.judge.trim() || null,
@@ -331,30 +391,30 @@ const confirmLogout = () => {
         user_id: user.id
       };
 
-      const { data, error } = await supabase
-        .from("cases")
-        .insert([newCase])
-        .select()
-        .single();
+      const { data, error } = await persistRecord("cases", newCase, user.id);
 
       if (error) throw error;
+      requestId.current += 1; setLoading(false);
 
-      setCases((prev) => [data, ...prev]);
+      setCases((prev) => editing ? prev.map(row => row.id === data.id ? data : row) : [data, ...prev]);
       setCaseForm({ ...emptyCase });
       setModal("");
 
-      Alert.alert("Success", "Case saved to Supabase!");
+      setEditing(null);
     } catch (error) {
-      Alert.alert("Case Error", error.message);
+      setFormError(error.message);
     } finally {
+      saveLock.current = false;
       setSaving(false);
     }
   };
 
   // ADD PAYMENT
   const addPayment = async () => {
+    if (logoutLock.current || saveLock.current) return;
+    setFormError("");
     if (!paymentForm.client.trim() || !paymentForm.total.trim()) {
-      Alert.alert("Required", "Enter client name and total fee.");
+      setFormError("Enter client name and total fee.");
       return;
     }
 
@@ -362,23 +422,22 @@ const confirmLogout = () => {
     const paid = Number(paymentForm.paid || 0);
 
     if (!Number.isFinite(total) || !Number.isFinite(paid) || total < 0 || paid < 0) {
-      Alert.alert("Invalid Amount", "Enter valid payment amounts.");
+      setFormError("Enter valid payment amounts.");
       return;
     }
 
     if (paid > total) {
-      Alert.alert("Invalid Amount", "Paid amount cannot exceed total fee.");
+      setFormError("Paid amount cannot exceed total fee.");
       return;
     }
 
     try {
+      saveLock.current = true;
       setSaving(true);
 
       const user = await getCurrentUser();
 
-      const selectedClient = clients.find(
-        (c) => c.name.trim().toLowerCase() === paymentForm.client.trim().toLowerCase()
-      );
+      const selectedClient = resolveClient(paymentForm.client);
 
       if (!selectedClient) {
         throw new Error("Client not found. Please enter an existing client name.");
@@ -387,9 +446,8 @@ const confirmLogout = () => {
       let selectedCase = null;
 
       if (paymentForm.caseNo.trim()) {
-        selectedCase = cases.find(
-          (c) => c.case_number.trim().toLowerCase() === paymentForm.caseNo.trim().toLowerCase()
-        );
+        const matches = cases.filter(c => c.client_id === selectedClient.id && c.case_number.trim().toLowerCase() === paymentForm.caseNo.trim().toLowerCase());
+        selectedCase = matches.find(c => c.id === editing?.case_id) || (matches.length === 1 ? matches[0] : null);
 
         if (!selectedCase) {
           throw new Error("Case number not found. Enter an existing case number.");
@@ -411,22 +469,20 @@ const confirmLogout = () => {
         user_id: user.id
       };
 
-      const { data, error } = await supabase
-        .from("payments")
-        .insert([newPayment])
-        .select()
-        .single();
+      const { data, error } = await persistRecord("payments", newPayment, user.id);
 
       if (error) throw error;
+      requestId.current += 1; setLoading(false);
 
-      setPayments((prev) => [data, ...prev]);
+      setPayments((prev) => editing ? prev.map(row => row.id === data.id ? data : row) : [data, ...prev]);
       setPaymentForm({ ...emptyPayment });
       setModal("");
 
-      Alert.alert("Success", "Payment saved to Supabase!");
+      setEditing(null);
     } catch (error) {
-      Alert.alert("Payment Error", error.message);
+      setFormError(error.message);
     } finally {
+      saveLock.current = false;
       setSaving(false);
     }
   };
@@ -473,7 +529,10 @@ const confirmLogout = () => {
   // };
 
   const closeModal = () => {
+  if (saveLock.current) return;
   setModal("");
+  setEditing(null);
+  setFormError("");
 };
 
 // LOGIN SESSION CHECK
@@ -504,12 +563,21 @@ if (!session) {
           <Text style={s.avatarText}>AD</Text>
         </View> */}
         <TouchableOpacity
-  style={s.logoutButton}
-  onPress={confirmLogout}
->
-  <Text style={s.logoutText}>Logout</Text>
-</TouchableOpacity>
+          style={[s.logoutButton, (loggingOut || saving) && { opacity: 0.5 }]}
+          onPress={confirmLogout}
+          disabled={loggingOut || saving}
+          accessibilityRole="button"
+        >
+          <Text style={s.logoutText}>
+            {loggingOut ? "Logging out..." : "Logout"}
+          </Text>
+        </TouchableOpacity>
       </View>
+      {!!logoutError && (
+        <Text accessibilityRole="alert" style={[s.empty, { color: "#DC2626" }]}>
+          Logout failed: {logoutError}
+        </Text>
+      )}
 
       <View style={s.navWrap}>
         <ScrollView horizontal showsHorizontalScrollIndicator={false}>
@@ -565,6 +633,7 @@ if (!session) {
                       <Text style={s.cardTitle}>{c.case_number}</Text>
                       <Text style={s.body}>{getClientName(c.client_id)} · {c.court_name || "Court not set"}</Text>
                       <Text style={s.date}>Hearing: {c.next_hearing}</Text>
+                <Button title="Edit Hearing" secondary onPress={() => openEdit("case", c)} disabled={loggingOut || saving} />
                     </View>
                   ))
                 )}
@@ -577,7 +646,7 @@ if (!session) {
         {tab === "Clients" && (
           <>
             <Text style={s.heading}>Clients</Text>
-            <Button title="+ Add Client" onPress={() => setModal("client")} />
+            <Button title="+ Add Client" onPress={() => openAdd("client")} />
 
             <TextInput
               style={s.search}
@@ -602,6 +671,7 @@ if (!session) {
                 <Text style={s.body}>Email: {c.email || "—"}</Text>
                 <Text style={s.body}>Address: {c.address || "—"}</Text>
                 <Text style={s.muted}>{c.notes || ""}</Text>
+                <Button title="Edit Client" secondary onPress={() => openEdit("client", c)} disabled={loggingOut || saving} />
               </View>
             ))}
           </>
@@ -611,7 +681,7 @@ if (!session) {
         {tab === "Cases" && (
           <>
             <Text style={s.heading}>Case Management</Text>
-            <Button title="+ Add Case" onPress={() => setModal("case")} />
+            <Button title="+ Add Case" onPress={() => openAdd("case")} />
 
             <TextInput
               style={s.search}
@@ -637,6 +707,7 @@ if (!session) {
                 <Text style={s.body}>Judge: {c.judge_name || "—"}</Text>
                 <Text style={s.date}>Next hearing: {c.next_hearing || "Not set"}</Text>
                 <Text style={s.muted}>{c.notes || ""}</Text>
+                <Button title="Edit Case" secondary onPress={() => openEdit("case", c)} disabled={loggingOut || saving} />
               </View>
             ))}
           </>
@@ -658,6 +729,7 @@ if (!session) {
                 <Text style={s.cardTitle}>{c.case_number}</Text>
                 <Text style={s.body}>{getClientName(c.client_id)} · {c.court_name || "—"}</Text>
                 <Text style={s.body}>Purpose / notes: {c.notes || "—"}</Text>
+                <Button title="Edit Hearing" secondary onPress={() => openEdit("case", c)} disabled={loggingOut || saving} />
               </View>
             ))}
           </>
@@ -674,7 +746,7 @@ if (!session) {
               <Text style={s.muted}>Total Received: {money(totalPaid)}</Text>
             </View>
 
-            <Button title="+ Add Payment Record" onPress={() => setModal("payment")} />
+            <Button title="+ Add Payment Record" onPress={() => openAdd("payment")} />
             <Button title="Refresh Payments" secondary onPress={fetchAllData} disabled={loading} />
 
             {loading ? (
@@ -691,6 +763,7 @@ if (!session) {
                   Balance: {money(Math.max(0, Number(p.total_fee || 0) - Number(p.paid_amount || 0)))}
                 </Text>
                 <Text style={s.muted}>{p.payment_date || "—"} · {p.payment_mode || "—"}</Text>
+                <Button title="Edit Payment" secondary onPress={() => openEdit("payment", p)} disabled={loggingOut || saving} />
               </View>
             ))}
           </>
@@ -700,7 +773,13 @@ if (!session) {
         {tab === "Advocate" && (
           <>
             <Text style={s.heading}>Advocate Profile</Text>
-            <Text style={s.muted}>Profile storage is not connected yet.</Text>
+            <View style={s.card}>
+              <Text style={s.cardTitle}>{profile.name || "Advocate"}</Text>
+              <Text style={s.body}>Email: {session.user.email || "—"}</Text>
+              <Text style={s.body}>Phone: {profile.phone || "—"}</Text>
+              <Text style={s.body}>Office: {profile.office || "—"}</Text>
+              <Button title="Edit Profile" secondary onPress={() => openEdit("profile", profile)} disabled={loggingOut || saving} />
+            </View>
             <View style={s.card}>
               <Text style={s.body}>Your Clients: {clients.length}</Text>
               <Text style={s.body}>Your Cases: {cases.length}</Text>
@@ -725,10 +804,10 @@ if (!session) {
           >
             <View style={s.modalHeader}>
               <Text style={s.heading}>
-                Add {modal === "client" ? "Client" : modal === "case" ? "Case" : "Payment"}
+                {editing ? "Edit" : "Add"} {modal === "client" ? "Client" : modal === "case" ? "Case" : modal === "profile" ? "Profile" : "Payment"}
               </Text>
               <TouchableOpacity onPress={closeModal}>
-                <Text style={s.close}>Close</Text>
+                <Text style={s.close}>Cancel</Text>
               </TouchableOpacity>
             </View>
 
@@ -736,6 +815,15 @@ if (!session) {
               keyboardShouldPersistTaps="handled"
               contentContainerStyle={{ padding: 18 }}
             >
+              {!!formError && <Text accessibilityRole="alert" style={{ color: "#DC2626", marginBottom: 12 }}>{formError}</Text>}
+              {modal === "profile" && (
+                <>
+                  <Field label="Advocate name *" value={profileForm.name} onChangeText={v => setProfileForm(prev => ({ ...prev, name: v }))} />
+                  <Field label="Phone" value={profileForm.phone} onChangeText={v => setProfileForm(prev => ({ ...prev, phone: v }))} keyboardType="phone-pad" />
+                  <Field label="Office address" value={profileForm.office} onChangeText={v => setProfileForm(prev => ({ ...prev, office: v }))} />
+                  <Button title={saving ? "Updating..." : "Update Profile"} onPress={saveProfile} disabled={saving} />
+                </>
+              )}
               {modal === "client" && (
                 <>
                   <Field label="Client name *" value={clientForm.name} onChangeText={(v) => setClientForm({ ...clientForm, name: v })} />
@@ -743,7 +831,7 @@ if (!session) {
                   <Field label="Email" value={clientForm.email} onChangeText={(v) => setClientForm({ ...clientForm, email: v })} />
                   <Field label="Address" value={clientForm.address} onChangeText={(v) => setClientForm({ ...clientForm, address: v })} />
                   <Field label="Notes" value={clientForm.notes} onChangeText={(v) => setClientForm({ ...clientForm, notes: v })} />
-                  <Button title={saving ? "Saving..." : "Save Client"} onPress={addClient} disabled={saving} />
+                  <Button title={saving ? "Saving..." : editing ? "Update Client" : "Save Client"} onPress={addClient} disabled={saving} />
                 </>
               )}
 
@@ -758,8 +846,9 @@ if (!session) {
                   <Field label="Petitioner" value={caseForm.petitioner} onChangeText={(v) => setCaseForm({ ...caseForm, petitioner: v })} />
                   <Field label="Respondent" value={caseForm.respondent} onChangeText={(v) => setCaseForm({ ...caseForm, respondent: v })} />
                   <Field label="Judge name" value={caseForm.judge} onChangeText={(v) => setCaseForm({ ...caseForm, judge: v })} />
+                  <Field label="Status" value={caseForm.status ?? "Active"} onChangeText={v => setCaseForm(prev => ({ ...prev, status: v }))} />
                   <Field label="Case notes" value={caseForm.notes} onChangeText={(v) => setCaseForm({ ...caseForm, notes: v })} />
-                  <Button title={saving ? "Saving..." : "Save Case"} onPress={addCase} disabled={saving} />
+                  <Button title={saving ? "Saving..." : editing ? "Update Case" : "Save Case"} onPress={addCase} disabled={saving} />
                 </>
               )}
 
@@ -772,7 +861,7 @@ if (!session) {
                   <Field label="Paid amount (₹)" value={paymentForm.paid} onChangeText={(v) => setPaymentForm({ ...paymentForm, paid: v })} keyboardType="numeric" />
                   <Field label="Payment date (YYYY-MM-DD)" value={paymentForm.date} onChangeText={(v) => setPaymentForm({ ...paymentForm, date: v })} />
                   <Field label="Payment mode" value={paymentForm.mode} onChangeText={(v) => setPaymentForm({ ...paymentForm, mode: v })} />
-                  <Button title={saving ? "Saving..." : "Save Payment"} onPress={addPayment} disabled={saving} />
+                  <Button title={saving ? "Saving..." : editing ? "Update Payment" : "Save Payment"} onPress={addPayment} disabled={saving} />
                 </>
               )}
             </ScrollView>

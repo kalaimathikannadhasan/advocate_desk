@@ -110,6 +110,49 @@ export default function App() {
   const [paymentForm, setPaymentForm] = useState({ ...emptyPayment });
 
   // Get logged-in user
+  // LOGOUT FUNCTION
+const handleLogout = async () => {
+  try {
+    const { error } = await supabase.auth.signOut();
+
+    if (error) throw error;
+
+    setSession(null);
+    setClients([]);
+    setCases([]);
+    setPayments([]);
+    setTab("Dashboard");
+    setSearch("");
+    setModal("");
+
+    console.log("Logout successful");
+
+  } catch (error) {
+    Alert.alert("Logout Failed", error.message);
+  }
+};
+
+// LOGOUT CONFIRMATION
+const confirmLogout = () => {
+  Alert.alert(
+    "Logout",
+    "Are you sure you want to logout?",
+    [
+      {
+        text: "Cancel",
+        style: "cancel",
+      },
+      {
+        text: "Logout",
+        style: "destructive",
+        onPress: handleLogout,
+      },
+    ]
+  );
+};
+
+// Get logged-in user
+
   const getCurrentUser = async () => {
     const { data, error } = await supabase.auth.getUser();
 
@@ -243,7 +286,26 @@ export default function App() {
 
     try {
       setSaving(true);
+      const handleLogout = async () => {
+  try {
+    const { error } = await supabase.auth.signOut();
 
+    if (error) throw error;
+
+    setSession(null);
+    setClients([]);
+    setCases([]);
+    setPayments([]);
+    setTab("Dashboard");
+    setSearch("");
+    setModal("");
+
+    console.log("Logout successful");
+
+  } catch (error) {
+    Alert.alert("Logout Failed", error.message);
+  }
+};
       const user = await getCurrentUser();
 
       const selectedClient = clients.find(
@@ -438,9 +500,15 @@ if (!session) {
           <Text style={s.brand}>ADVOCATE DESK</Text>
           <Text style={s.subtitle}>Case & Client Management</Text>
         </View>
-        <View style={s.avatar}>
+        {/* <View style={s.avatar}>
           <Text style={s.avatarText}>AD</Text>
-        </View>
+        </View> */}
+        <TouchableOpacity
+  style={s.logoutButton}
+  onPress={confirmLogout}
+>
+  <Text style={s.logoutText}>Logout</Text>
+</TouchableOpacity>
       </View>
 
       <View style={s.navWrap}>
@@ -716,6 +784,20 @@ if (!session) {
 }
 
 const s = StyleSheet.create({
+  logoutButton: {
+  backgroundColor: "#FEE2E2",
+  paddingHorizontal: 16,
+  paddingVertical: 10,
+  borderRadius: 8,
+  borderWidth: 1,
+  borderColor: "#FECACA",
+},
+
+logoutText: {
+  color: "#DC2626",
+  fontSize: 13,
+  fontWeight: "700",
+},
   safe: { flex: 1, backgroundColor: "#F4F6FA" },
   header: { paddingHorizontal: 18, paddingTop: 12, paddingBottom: 14, flexDirection: "row", justifyContent: "space-between", alignItems: "center", backgroundColor: "#FFFFFF" },
   brand: { fontSize: 19, fontWeight: "900", letterSpacing: 1.2, color: "#182B4D" },

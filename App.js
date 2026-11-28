@@ -1,4 +1,3 @@
-
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   SafeAreaView, View, Text, TextInput, TouchableOpacity,
@@ -116,6 +115,89 @@ function Stat({ title, value, color }) {
       <Text style={s.statValue}>{value}</Text>
       <Text style={s.muted}>{title}</Text>
     </View>
+  );
+}
+
+function AuthEntry() {
+  const [signup, setSignup] = useState(() => Platform.OS === 'web' && typeof window !== 'undefined' && new URLSearchParams(window.location.search).get('signup') === '1');
+  const [form, setForm] = useState({ name: '', email: '', phone: '', password: '', confirm: '' });
+  const [busy, setBusy] = useState(false);
+  const lock = useRef(false);
+  const [error, setError] = useState('');
+  const [notice, setNotice] = useState('');
+  const switchPage = (next) => {
+    setSignup(next); setError(''); setNotice('');
+    setForm({ name: '', email: '', phone: '', password: '', confirm: '' });
+    if (Platform.OS === 'web' && typeof window !== 'undefined') {
+      const url = new URL(window.location.href);
+      if (next) url.searchParams.set('signup', '1'); else url.searchParams.delete('signup');
+      window.history.replaceState(null, '', url.toString());
+    }
+  };
+  const register = async () => {
+    if (lock.current) return;
+    setError(''); setNotice('');
+    const email = form.email.trim().toLowerCase();
+    if (!form.name.trim() || !form.phone.trim()) return setError('Enter your full name and mobile number.');
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return setError('Enter a valid email address.');
+    if (!/^\+?[0-9]{7,15}$/.test(form.phone.trim())) return setError('Enter a valid mobile number (7–15 digits, optional +).');
+    if (form.password.length < 8) return setError('Password must contain at least 8 characters.');
+    if (form.password !== form.confirm) return setError('Passwords do not match.');
+    lock.current = true; setBusy(true);
+    try {
+      const options = { data: { name: form.name.trim(), phone: form.phone.trim() } };
+      if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        options.emailRedirectTo = window.location.origin + window.location.pathname;
+      }
+      const { data, error: authError } = await supabase.auth.signUp({ email, password: form.password, options });
+      if (authError) throw authError;
+      setForm({ name: '', email: '', phone: '', password: '', confirm: '' });
+      if (!data.session) setNotice('If registration is available for this email, check your inbox for the confirmation link. Verify your email before logging in.');
+      else if (Platform.OS === 'web' && typeof window !== 'undefined') {
+        const url = new URL(window.location.href); url.searchParams.delete('signup'); window.history.replaceState(null, '', url.toString());
+      }
+    } catch (e) { setError(e.message || 'Registration failed. Please try again.'); }
+    finally { lock.current = false; setBusy(false); }
+  };
+  if (!signup) return (
+    <View style={{ flex: 1, backgroundColor: '#F4F6FA' }}>
+      <View style={{ flex: 1 }}><LoginScreen /></View>
+      <SafeAreaView style={{ padding: 16, alignItems: 'center' }}>
+        <Text style={s.muted}>New employee?</Text>
+        <TouchableOpacity accessibilityRole="button" onPress={() => switchPage(true)} style={{ padding: 12 }}>
+          <Text style={s.close}>Create an account / Sign up</Text>
+        </TouchableOpacity>
+      </SafeAreaView>
+    </View>
+  );
+  return (
+    <SafeAreaView style={s.safe}>
+      <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined}>
+        <ScrollView keyboardShouldPersistTaps="handled" contentContainerStyle={{ padding: 24, flexGrow: 1, justifyContent: 'center' }}>
+          <View style={{ width: '100%', maxWidth: 480, alignSelf: 'center' }}>
+            <Text style={s.brand}>ADVOCATE DESK</Text>
+            <Text style={[s.heading, { marginTop: 16 }]}>Employee registration</Text>
+            <Text style={s.muted}>Create your individual account.</Text>
+            <View style={s.card}>
+              {[
+                ['name', 'Full name', 'default', false], ['email', 'Email address', 'email-address', false],
+                ['phone', 'Mobile number', 'phone-pad', false], ['password', 'Password (minimum 8 characters)', 'default', true],
+                ['confirm', 'Confirm password', 'default', true]
+              ].map(([key, label, keyboardType, secure]) => (
+                <View key={key} style={s.field}>
+                  <Text style={s.label}>{label}</Text>
+                  <TextInput style={s.input} value={form[key]} editable={!busy} onChangeText={value => setForm(prev => ({ ...prev, [key]: value }))} keyboardType={keyboardType} secureTextEntry={secure} autoCapitalize={key === 'name' ? 'words' : 'none'} autoCorrect={false} />
+                </View>
+              ))}
+              {!!error && <Text accessibilityRole="alert" style={{ color: '#B91C1C', marginBottom: 8 }}>{error}</Text>}
+              {!!notice && <Text accessibilityRole="alert" style={{ color: '#166534', marginBottom: 8 }}>{notice}</Text>}
+              <Button title={busy ? 'Creating account...' : 'Create Account'} onPress={register} disabled={busy} />
+              <Button title="Already have an account? Login" secondary onPress={() => switchPage(false)} disabled={busy} />
+            </View>
+          </View>
+        </ScrollView>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
@@ -721,7 +803,7 @@ if (authLoading) {
 
 // SHOW LOGIN PAGE
 if (!session) {
-  return <LoginScreen />;
+  return <AuthEntry />;
 }
 
 // SHOW DASHBOARD AFTER LOGIN

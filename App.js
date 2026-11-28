@@ -2,11 +2,70 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   SafeAreaView, View, Text, TextInput, TouchableOpacity,
-  ScrollView, StyleSheet, Alert, Modal, KeyboardAvoidingView, Platform
+  ScrollView, StyleSheet, Alert, Modal, KeyboardAvoidingView, Platform, Linking
 } from "react-native";
 import { StatusBar } from "expo-status-bar";
 import { supabase } from "./lib/supabase";
 import LoginScreen from "./screens/login";
+import * as DocumentPicker from "expo-document-picker";
+import * as FileSystem from "expo-file-system/legacy";
+import * as Sharing from "expo-sharing";
+import { decode } from "base64-arraybuffer";
+import * as XLSX from "xlsx";
+
+const BUCKET = "advocate-documents";
+const MAX_BYTES = 10 * 1024 * 1024;
+const allowedTypes = {
+  pdf: "application/pdf", doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel", xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", txt: "text/plain"
+};
+const documentFolder = (uid, kind, id) => `${uid}/${kind}/${id}`;
+const displayFileName = name => name.replace(/^\d+-[a-z0-9]+__/, "");
+async function listDocuments(uid, kind, id) {
+  const rows = [];
+  for (let offset = 0; ; offset += 100) {
+    const { data, error } = await supabase.storage.from(BUCKET).list(documentFolder(uid, kind, id), {
+      limit: 100, offset, sortBy: { column: "name", order: "asc" }
+    });
+    if (error) throw error;
+    rows.push(...(data || []).filter(row => row.id));
+    if ((data || []).length < 100) return rows;
+  }
+}
+async function fetchExportRows(table, uid) {
+  const rows = [];
+  for (let offset = 0; ; offset += 100) {
+    const { data, error } = await supabase.from(table).select("*").eq("user_id", uid)
+      .order("id", { ascending: true }).range(offset, offset + 99);
+    if (error) throw error;
+    rows.push(...(data || []));
+    if ((data || []).length < 100) return rows;
+  }
+}
+function addExportSheet(book, name, rows, columns) {
+  const sheet = XLSX.utils.aoa_to_sheet([columns, ...rows.map(row => columns.map(key => {
+    const value = row[key];
+    return value == null ? "" : typeof value === "object" ? JSON.stringify(value) : value;
+  }))]);
+  sheet["!cols"] = columns.map(key => ({ wch: Math.max(16, Math.min(32, key.length + 4)) }));
+  sheet["!autofilter"] = { ref: sheet["!ref"] };
+  XLSX.utils.book_append_sheet(book, sheet, name);
+}
+async function saveWorkbook(book, filename) {
+  if (Platform.OS === "web") {
+    XLSX.writeFile(book, filename, { bookType: "xlsx" });
+    return;
+  }
+  if (!(await Sharing.isAvailableAsync())) throw new Error("File sharing is not available on this device.");
+  const uri = FileSystem.cacheDirectory + filename;
+  try {
+    await FileSystem.writeAsStringAsync(uri, XLSX.write(book, { type: "base64", bookType: "xlsx" }), { encoding: FileSystem.EncodingType.Base64 });
+    await Sharing.shareAsync(uri, { mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", UTI: "org.openxmlformats.spreadsheetml.sheet" });
+  } finally { await FileSystem.deleteAsync(uri, { idempotent: true }).catch(() => {}); }
+}
+
 
 
 const tabs = ["Dashboard", "Clients", "Cases", "Hearings", "Fees", "Advocate"];
@@ -108,6 +167,14 @@ export default function App() {
   const [profileForm, setProfileForm] = useState({ name: "", phone: "", office: "" });
   const saveLock = useRef(false);
   const [search, setSearch] = useState("");
+  const [documentTarget, setDocumentTarget] = useState(null);
+  const [documents, setDocuments] = useState([]);
+  const [documentError, setDocumentError] = useState("");
+  const [exportError, setExportError] = useState("");
+  const [exporting, setExporting] = useState(false);
+  const [documentBusy, setDocumentBusy] = useState(false);
+  const activeUser = useRef(null);
+  activeUser.current = session?.user?.id ?? null;
 
   const [clientForm, setClientForm] = useState({ ...emptyClient });
   const [caseForm, setCaseForm] = useState({ ...emptyCase });
@@ -127,6 +194,7 @@ export default function App() {
       if (error) throw error;
 
       requestId.current += 1;
+      setDocumentTarget(null); setDocuments([]); setDocumentError(""); setExportError("");
       setEditing(null);
       setFormError("");
       setProfileForm({ name: "", phone: "", office: "" });
@@ -235,6 +303,113 @@ export default function App() {
     fetchAllData();
     return () => { requestId.current += 1; };
   }, [authLoading, userId, fetchAllData]);
+
+  useEffect(() => {
+    setDocumentTarget(null); setDocuments([]); setDocumentError(""); setExportError("");
+  }, [userId]);
+
+  const runDocumentTask = async (task) => {
+    if (saveLock.current || logoutLock.current || !userId) return;
+    saveLock.current = true;
+    setSaving(true); setDocumentBusy(true); setDocumentError("");
+    try { await task(); }
+    catch (error) { if (activeUser.current === userId) setDocumentError(error.message || String(error)); }
+    finally { saveLock.current = false; setSaving(false); setDocumentBusy(false); }
+  };
+
+  const refreshDocuments = async (target) => {
+    const rows = await listDocuments(userId, target.kind, target.id);
+    if (activeUser.current === userId) setDocuments(rows);
+  };
+
+  const openDocuments = (kind, row) => runDocumentTask(async () => {
+    const target = { kind, id: row.id, title: kind === "client" ? row.name : row.case_number };
+    setDocumentTarget(target); setDocuments([]);
+    await refreshDocuments(target);
+  });
+
+  const uploadDocument = () => runDocumentTask(async () => {
+    const target = documentTarget;
+    if (!target) return;
+    const result = await DocumentPicker.getDocumentAsync({ type: "*/*", multiple: false, copyToCacheDirectory: true });
+    if (result.canceled) return;
+    const asset = result.assets[0];
+    if (!asset) return;
+    try {
+      const ext = asset.name.split(".").pop().toLowerCase();
+      if (!Object.prototype.hasOwnProperty.call(allowedTypes, ext)) throw new Error("Unsupported file type. Choose PDF, Word, Excel, JPG, PNG or TXT.");
+      if (asset.size != null && asset.size > MAX_BYTES) throw new Error("Maximum file size is 10 MB.");
+      let bytes;
+      if (Platform.OS === "web") {
+        bytes = asset.file ? await asset.file.arrayBuffer() : await (await fetch(asset.uri)).arrayBuffer();
+      } else {
+        const info = await FileSystem.getInfoAsync(asset.uri);
+        if (info.size > MAX_BYTES) throw new Error("Maximum file size is 10 MB.");
+        bytes = decode(await FileSystem.readAsStringAsync(asset.uri, { encoding: FileSystem.EncodingType.Base64 }));
+      }
+      if (!bytes.byteLength || bytes.byteLength > MAX_BYTES) throw new Error("File must be non-empty and at most 10 MB.");
+      if (activeUser.current !== userId) throw new Error("Session changed. Please sign in again.");
+      const safeName = asset.name.replace(/[^a-zA-Z0-9._-]/g, "_").slice(0, 150);
+      const name = `${Date.now()}-${Math.random().toString(36).slice(2)}__${safeName}`;
+      const path = `${documentFolder(userId, target.kind, target.id)}/${name}`;
+      const { error } = await supabase.storage.from(BUCKET).upload(path, bytes, { contentType: allowedTypes[ext], upsert: false });
+      if (error) throw error;
+      await refreshDocuments(target);
+    } finally {
+      if (Platform.OS !== "web" && asset.uri.startsWith(FileSystem.cacheDirectory || "file://invalid")) {
+        await FileSystem.deleteAsync(asset.uri, { idempotent: true }).catch(() => {});
+      }
+    }
+  });
+
+  const downloadDocument = (file) => runDocumentTask(async () => {
+    const path = `${documentFolder(userId, documentTarget.kind, documentTarget.id)}/${file.name}`;
+    const { data, error } = await supabase.storage.from(BUCKET).createSignedUrl(path, 60, { download: displayFileName(file.name) });
+    if (error) throw error;
+    if (activeUser.current !== userId) return;
+    if (Platform.OS === "web") {
+      const a = document.createElement("a");
+      a.href = data.signedUrl; a.rel = "noopener noreferrer";
+      document.body.appendChild(a); a.click(); a.remove();
+    } else { await Linking.openURL(data.signedUrl); }
+  });
+
+  const exportAllData = async () => {
+    if (saveLock.current || logoutLock.current || !userId) return;
+    saveLock.current = true; setSaving(true); setExporting(true); setExportError("");
+    try {
+      const user = await getCurrentUser();
+      if (user.id !== userId) throw new Error("Session changed. Please sign in again.");
+      const [allClients, allCases, allPayments] = await Promise.all([
+        fetchExportRows("client_details", user.id), fetchExportRows("cases", user.id), fetchExportRows("payments", user.id)
+      ]);
+      const clientNames = new Map(allClients.map(row => [row.id, row.name]));
+      const caseNumbers = new Map(allCases.map(row => [row.id, row.case_number]));
+      const caseRows = allCases.map(row => ({ ...row, client_name: clientNames.get(row.client_id) || "" }));
+      const paymentRows = allPayments.map(row => ({ ...row, client_name: clientNames.get(row.client_id) || "", case_number: caseNumbers.get(row.case_id) || "", balance: Math.max(0, Number(row.total_fee || 0) - Number(row.paid_amount || 0)) }));
+      const attachments = [];
+      for (const [kind, rows] of [["client", allClients], ["case", allCases]]) {
+        for (const row of rows) {
+          if (activeUser.current !== userId) throw new Error("Session changed.");
+          const files = await listDocuments(user.id, kind, row.id);
+          for (const file of files) attachments.push({ record_type: kind, record_id: row.id, record_name: kind === "client" ? row.name : row.case_number, file_name: displayFileName(file.name), size_bytes: file.metadata?.size ?? "", uploaded_at: file.created_at ?? "" });
+        }
+      }
+      const book = XLSX.utils.book_new();
+      const columns = (rows, defaults) => [...new Set([...defaults, ...rows.flatMap(row => Object.keys(row))])];
+      addExportSheet(book, "Summary", [{ clients: allClients.length, cases: allCases.length, active_cases: allCases.filter(row => row.status === "Active").length, total_received: paymentRows.reduce((sum, row) => sum + Number(row.paid_amount || 0), 0), pending_fees: paymentRows.reduce((sum, row) => sum + row.balance, 0), documents: attachments.length, exported_at: new Date().toISOString() }], ["clients", "cases", "active_cases", "total_received", "pending_fees", "documents", "exported_at"]);
+      addExportSheet(book, "Clients", allClients, columns(allClients, ["id", "name", "phone", "email", "address", "notes"]));
+      addExportSheet(book, "Cases", caseRows, columns(caseRows, ["id", "case_number", "case_type", "client_id", "client_name", "court_name", "next_hearing", "status", "petitioner", "respondent", "judge_name", "notes"]));
+      addExportSheet(book, "Hearings", caseRows.filter(row => row.next_hearing), ["id", "case_number", "client_name", "court_name", "next_hearing", "status", "notes"]);
+      addExportSheet(book, "Fees", paymentRows, columns(paymentRows, ["id", "client_id", "client_name", "case_id", "case_number", "total_fee", "paid_amount", "balance", "payment_date", "payment_mode"]));
+      const meta = user.user_metadata || {};
+      addExportSheet(book, "Advocate", [{ name: meta.name, email: user.email, phone: meta.phone, office: meta.office }], ["name", "email", "phone", "office"]);
+      addExportSheet(book, "Documents", attachments, ["record_type", "record_id", "record_name", "file_name", "size_bytes", "uploaded_at"]);
+      if (activeUser.current !== userId) throw new Error("Session changed.");
+      await saveWorkbook(book, `AdvocateDesk_${new Date().toISOString().replace(/[:.]/g, "-")}.xlsx`);
+    } catch (error) { if (activeUser.current === userId) setExportError(error.message || String(error)); }
+    finally { saveLock.current = false; setSaving(false); setExporting(false); }
+  };
 
   // Find client name using client_id
   const getClientName = (clientId) => {
@@ -606,7 +781,9 @@ if (!session) {
             <Text style={s.heading}>Good day, Advocate</Text>
             <Text style={s.muted}>Your office overview.</Text>
 
-            <Button title="↻ Refresh All Data" secondary onPress={fetchAllData} disabled={loading} />
+            <Button title="↻ Refresh All Data" secondary onPress={fetchAllData} disabled={loading || saving} />
+            <Button title={exporting ? "Exporting..." : "Export All Data to Excel"} onPress={exportAllData} disabled={saving || loggingOut} />
+            {!!exportError && <Text accessibilityRole="alert" style={{ color: "#DC2626" }}>{exportError}</Text>}
 
             {loading ? (
               <Text style={s.empty}>Loading dashboard...</Text>
@@ -672,6 +849,7 @@ if (!session) {
                 <Text style={s.body}>Address: {c.address || "—"}</Text>
                 <Text style={s.muted}>{c.notes || ""}</Text>
                 <Button title="Edit Client" secondary onPress={() => openEdit("client", c)} disabled={loggingOut || saving} />
+                <Button title="Documents / Upload File" secondary onPress={() => openDocuments("client", c)} disabled={loggingOut || saving} />
               </View>
             ))}
           </>
@@ -708,6 +886,7 @@ if (!session) {
                 <Text style={s.date}>Next hearing: {c.next_hearing || "Not set"}</Text>
                 <Text style={s.muted}>{c.notes || ""}</Text>
                 <Button title="Edit Case" secondary onPress={() => openEdit("case", c)} disabled={loggingOut || saving} />
+                <Button title="Documents / Upload File" secondary onPress={() => openDocuments("case", c)} disabled={loggingOut || saving} />
               </View>
             ))}
           </>
@@ -790,6 +969,28 @@ if (!session) {
 
         <View style={{ height: 30 }} />
       </ScrollView>
+
+      <Modal visible={!!documentTarget} animationType="slide" onRequestClose={() => { if (!saveLock.current) setDocumentTarget(null); }}>
+        <SafeAreaView style={s.modalSafe}>
+          <View style={s.modalHeader}>
+            <Text style={s.heading}>Documents</Text>
+            <TouchableOpacity disabled={documentBusy} onPress={() => setDocumentTarget(null)}><Text style={s.close}>Close</Text></TouchableOpacity>
+          </View>
+          <ScrollView contentContainerStyle={{ padding: 18 }}>
+            <Text style={s.cardTitle}>{documentTarget?.title}</Text>
+            <Text style={s.muted}>PDF, Word, Excel, JPG, PNG or TXT · 10 MB per file</Text>
+            <Button title={documentBusy ? "Please wait..." : "+ Upload File"} onPress={uploadDocument} disabled={saving || loggingOut} />
+            <Button title="Refresh Documents" secondary onPress={() => runDocumentTask(() => refreshDocuments(documentTarget))} disabled={saving || loggingOut} />
+            {!!documentError && <Text accessibilityRole="alert" style={{ color: "#DC2626", marginTop: 12 }}>{documentError}</Text>}
+            {!documentBusy && !documents.length && <Text style={s.empty}>No files uploaded for this record.</Text>}
+            {documents.map(file => <View key={file.id} style={s.card}>
+              <Text style={s.cardTitle}>{displayFileName(file.name)}</Text>
+              <Text style={s.muted}>{file.created_at ? new Date(file.created_at).toLocaleString() : ""}</Text>
+              <Button title="Download File" secondary onPress={() => downloadDocument(file)} disabled={saving || loggingOut} />
+            </View>)}
+          </ScrollView>
+        </SafeAreaView>
+      </Modal>
 
       {/* ADD MODAL */}
       <Modal
